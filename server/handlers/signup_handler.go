@@ -1,11 +1,13 @@
 package handlers
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/gomodule/redigo/redis"
 	uuid "github.com/satori/go.uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -13,15 +15,15 @@ import (
 
 // Create a struct that models the structure of a user, both in the request body, and in the DB
 type Credentials struct {
-	Password string `json:"password", db:"password"`
-	Username string `json:"username", db:"username"`
+	Password string `json:"password"`
+	Email    string `json:"email"`
 }
 
 type Session struct {
 	Token string `json:"session_token"`
 }
 
-func Signin(w http.ResponseWriter, r *http.Request, db *sql.DB, cache redis.Conn) {
+func Signin(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache redis.Conn) {
 	// Parse and decode the request body into a new `Credentials` instance
 	creds := &Credentials{}
 	err := json.NewDecoder(r.Body).Decode(creds)
@@ -30,28 +32,41 @@ func Signin(w http.ResponseWriter, r *http.Request, db *sql.DB, cache redis.Conn
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	// Get the existing entry present in the database for the given username
-	result := db.QueryRow("select password from users where username=$1", creds.Username)
-	if err != nil {
-		// If there is an issue with the database, return a 500 error
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+
+	input := &dynamodb.GetItemInput{
+		Key: map[string]*dynamodb.AttributeValue{
+			"Email": {
+				S: aws.String(creds.Email),
+			},
+		},
+		TableName: aws.String("go_vouchers_users"),
 	}
-	// We create another instance of `Credentials` to store the credentials we get from the database
-	storedCreds := &Credentials{}
-	// Store the obtained password in `storedCreds`
-	err = result.Scan(&storedCreds.Password)
+
+	result, err := db.GetItem(input)
 	if err != nil {
-		// If an entry with the username does not exist, send an "Unauthorized"(401) status
-		if err == sql.ErrNoRows {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case dynamodb.ErrCodeProvisionedThroughputExceededException:
+				fmt.Println(dynamodb.ErrCodeProvisionedThroughputExceededException, aerr.Error())
+			case dynamodb.ErrCodeResourceNotFoundException:
+				fmt.Println(dynamodb.ErrCodeResourceNotFoundException, aerr.Error())
+			case dynamodb.ErrCodeInternalServerError:
+				fmt.Println(dynamodb.ErrCodeInternalServerError, aerr.Error())
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(err.Error())
 		}
-		// If the error is of any other type, send a 500 status
-		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
+	storedCreds := Credentials{
+		Email:    *result.Item["Email"].S,
+		Password: *result.Item["Password"].S,
+	}
 	// Compare the stored hashed password, with the hashed version of the password that was received
 	if err = bcrypt.CompareHashAndPassword([]byte(storedCreds.Password), []byte(creds.Password)); err != nil {
 		// If the two passwords don't match, return a 401 status
@@ -68,7 +83,7 @@ func Signin(w http.ResponseWriter, r *http.Request, db *sql.DB, cache redis.Conn
 
 	// Set the token in the cache, along with the user whom it represents
 	// The token has an expiry time of 120 seconds
-	_, err = cache.Do("SETEX", sessionToken.String(), "120", creds.Username)
+	_, err = cache.Do("SETEX", sessionToken.String(), "120", creds.Email)
 	if err != nil {
 		// If there is an error in setting the cache, return an internal server error
 		w.WriteHeader(http.StatusInternalServerError)
@@ -85,8 +100,7 @@ func Signin(w http.ResponseWriter, r *http.Request, db *sql.DB, cache redis.Conn
 	// The default 200 status is sent
 }
 
-func Signup(w http.ResponseWriter, r *http.Request, db *sql.DB, cache redis.Conn) {
-	// Parse and decode the request body into a new `Credentials` instance
+func Signup(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache redis.Conn) {
 	creds := &Credentials{}
 	err := json.NewDecoder(r.Body).Decode(creds)
 	if err != nil {
@@ -94,17 +108,52 @@ func Signup(w http.ResponseWriter, r *http.Request, db *sql.DB, cache redis.Conn
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	// Salt and hash the password using the bcrypt algorithm
-	// The second argument is the cost of hashing, which we arbitrarily set as 8 (this value can be more or less, depending on the computing power you wish to utilize)
+
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(creds.Password), 8)
 
-	// Next, insert the username, along with the hashed password into the database
-	if _, err = db.Query("INSERT INTO users(username, password) VALUES($1, $2)", creds.Username, string(hashedPassword)); err != nil {
-		// If there is any issue with inserting into the database, return a 500 error
-		w.WriteHeader(http.StatusInternalServerError)
+	input := &dynamodb.UpdateItemInput{
+		TableName: aws.String("go_vouchers_users"),
+		ExpressionAttributeNames: map[string]*string{
+			"#P": aws.String("Password"),
+		},
+		Key: map[string]*dynamodb.AttributeValue{
+			"Email": {
+				S: aws.String(creds.Email),
+			},
+		},
+		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+			":p": {
+				S: aws.String(string(hashedPassword)),
+			},
+		},
+		UpdateExpression: aws.String("SET #P = :p"),
+	}
+
+	result, err := db.UpdateItem(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case dynamodb.ErrCodeConditionalCheckFailedException:
+				fmt.Println(dynamodb.ErrCodeConditionalCheckFailedException, aerr.Error())
+			case dynamodb.ErrCodeProvisionedThroughputExceededException:
+				fmt.Println(dynamodb.ErrCodeProvisionedThroughputExceededException, aerr.Error())
+			case dynamodb.ErrCodeResourceNotFoundException:
+				fmt.Println(dynamodb.ErrCodeResourceNotFoundException, aerr.Error())
+			case dynamodb.ErrCodeItemCollectionSizeLimitExceededException:
+				fmt.Println(dynamodb.ErrCodeItemCollectionSizeLimitExceededException, aerr.Error())
+			case dynamodb.ErrCodeInternalServerError:
+				fmt.Println(dynamodb.ErrCodeInternalServerError, aerr.Error())
+			default:
+				fmt.Println(aerr.Error())
+			}
+		} else {
+			// Print the error, cast err to awserr.Error to get the Code and
+			// Message from an error.
+			fmt.Println(err.Error())
+		}
 		return
 	}
-	// We reach this point if the credentials we correctly stored in the database, and the default status of 200 is sent back
+	fmt.Println(result)
 }
 
 func Welcome(w http.ResponseWriter, r *http.Request, cache redis.Conn) {

@@ -1,23 +1,33 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/gomodule/redigo/redis"
 	_ "github.com/lib/pq"
-	"github.com/timpwbaker/go_burgers/server/handlers"
+	"github.com/timpwbaker/go_vouchers/pkg/env"
+	"github.com/timpwbaker/go_vouchers/server/handlers"
 )
 
-// The "DB" package level variable will hold the reference to our database instance
-var db *sql.DB
+var db *dynamodb.DynamoDB
 
 // Store the redis connection as a package level variable
 var cache redis.Conn
 
 func main() {
+	appEnv := env.GetAppEnv()
+	logger := log.New(os.Stderr, "[boot] ", log.LstdFlags)
+
+	err := env.LoadEnvFileIfNeeded(appEnv)
+	if err != nil {
+		logger.Fatalf("dotenv error: %v\n", err)
+	}
+
 	// "Signin" and "Signup" are handler that we will implement
 	http.HandleFunc("/signup", func(w http.ResponseWriter, r *http.Request) {
 		handlers.Signup(w, r, db, cache)
@@ -47,11 +57,9 @@ func initCache() {
 }
 
 func initDB() {
-	var err error
-	// Connect to the postgres db
-	//you might have to change the connection string to add your database credentials
-	db, err = sql.Open("postgres", "dbname=go_burgers sslmode=disable")
-	if err != nil {
-		panic(err)
-	}
+	sess := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
+
+	db = dynamodb.New(sess)
 }
