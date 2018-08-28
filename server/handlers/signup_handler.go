@@ -25,7 +25,7 @@ type Session struct {
 	Token string `json:"session_token"`
 }
 
-func Signin(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache redis.Conn) {
+func Signin(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, redisPool *redis.Pool) {
 	// Parse and decode the request body into a new `Credentials` instance
 	creds := &Credentials{}
 	err := json.NewDecoder(r.Body).Decode(creds)
@@ -58,13 +58,15 @@ func Signin(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache
 
 	// Set the token in the cache, along with the user whom it represents
 	// The token has an expiry time of 120 seconds
-	_, err = cache.Do("SETEX", sessionToken.String(), "120", creds.Email)
+	conn := redisPool.Get()
+	_, err = conn.Do("SETEX", sessionToken.String(), "120", creds.Email)
 	if err != nil {
 		// If there is an error in setting the cache, return an internal server error
 		w.WriteHeader(http.StatusInternalServerError)
 		log.Printf("failed to set session token in redis: %v", err)
 		return
 	}
+	conn.Close()
 
 	session := Session{Token: sessionToken.String()}
 	body, err := json.Marshal(session)
@@ -76,7 +78,7 @@ func Signin(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache
 	// The default 200 status is sent
 }
 
-func Signup(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache redis.Conn) {
+func Signup(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, redisPool *redis.Pool) {
 	creds := &Credentials{}
 	err := json.NewDecoder(r.Body).Decode(creds)
 	if err != nil {
@@ -132,7 +134,7 @@ func Signup(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache
 	fmt.Println(result)
 }
 
-func Welcome(w http.ResponseWriter, r *http.Request, cache redis.Conn) {
+func Welcome(w http.ResponseWriter, r *http.Request, redisPool *redis.Pool) {
 
 	sessionToken := r.Header.Get("Session_token")
 	if sessionToken == "" {
@@ -141,7 +143,9 @@ func Welcome(w http.ResponseWriter, r *http.Request, cache redis.Conn) {
 	}
 
 	// We then get the name of the user from our cache, where we set the session token
-	response, err := cache.Do("GET", sessionToken)
+	conn := redisPool.Get()
+	response, err := conn.Do("GET", sessionToken)
+	conn.Close()
 	if err != nil {
 		// If there is an error fetching from cache, return an internal server error status
 		w.WriteHeader(http.StatusInternalServerError)

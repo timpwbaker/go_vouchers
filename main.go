@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
@@ -16,8 +17,7 @@ import (
 
 var db *dynamodb.DynamoDB
 
-// Store the redis connection as a package level variable
-var cache redis.Conn
+var redisPool *redis.Pool
 
 func main() {
 	appEnv := env.GetAppEnv()
@@ -36,13 +36,13 @@ func main() {
 
 	// "Signin" and "Signup" are handler that we will implement
 	http.HandleFunc("/signup", func(w http.ResponseWriter, r *http.Request) {
-		handlers.Signup(w, r, db, cache)
+		handlers.Signup(w, r, db, redisPool)
 	})
 	http.HandleFunc("/signin", func(w http.ResponseWriter, r *http.Request) {
-		handlers.Signin(w, r, db, cache)
+		handlers.Signin(w, r, db, redisPool)
 	})
 	http.HandleFunc("/welcome", func(w http.ResponseWriter, r *http.Request) {
-		handlers.Welcome(w, r, cache)
+		handlers.Welcome(w, r, redisPool)
 	})
 	// initialize our database connection
 	initDB()
@@ -54,13 +54,16 @@ func main() {
 
 func initCache() {
 	redisURL := os.Getenv("REDIS_URL")
-	// Initialize the redis connection to a redis instance running on your local machine
-	conn, err := redis.DialURL(redisURL)
-	if err != nil {
-		panic(err)
+	// Assign the connection to the package level `redisPool` variable
+	redisPool = newPool(redisURL)
+}
+
+func newPool(addr string) *redis.Pool {
+	return &redis.Pool{
+		MaxIdle:     3,
+		IdleTimeout: 240 * time.Second,
+		Dial:        func() (redis.Conn, error) { return redis.DialURL(addr) },
 	}
-	// Assign the connection to the package level `cache` variable
-	cache = conn
 }
 
 func initDB() {
