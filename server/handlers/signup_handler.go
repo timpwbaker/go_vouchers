@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -10,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/gomodule/redigo/redis"
 	uuid "github.com/satori/go.uuid"
+	"github.com/timpwbaker/go_vouchers/dataaccess/users"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -33,35 +35,8 @@ func Signin(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache
 		return
 	}
 
-	input := &dynamodb.GetItemInput{
-		Key: map[string]*dynamodb.AttributeValue{
-			"Email": {
-				S: aws.String(creds.Email),
-			},
-		},
-		TableName: aws.String("go_vouchers_users"),
-	}
-
-	result, err := db.GetItem(input)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			case dynamodb.ErrCodeProvisionedThroughputExceededException:
-				fmt.Println(dynamodb.ErrCodeProvisionedThroughputExceededException, aerr.Error())
-			case dynamodb.ErrCodeResourceNotFoundException:
-				fmt.Println(dynamodb.ErrCodeResourceNotFoundException, aerr.Error())
-			case dynamodb.ErrCodeInternalServerError:
-				fmt.Println(dynamodb.ErrCodeInternalServerError, aerr.Error())
-			default:
-				fmt.Println(aerr.Error())
-			}
-		} else {
-			// Print the error, cast err to awserr.Error to get the Code and
-			// Message from an error.
-			fmt.Println(err.Error())
-		}
-		return
-	}
+	repo := users.NewRepo(db)
+	result, err := repo.GetUserItem(creds.Email)
 
 	storedCreds := Credentials{
 		Email:    *result.Item["Email"].S,
@@ -87,6 +62,7 @@ func Signin(w http.ResponseWriter, r *http.Request, db *dynamodb.DynamoDB, cache
 	if err != nil {
 		// If there is an error in setting the cache, return an internal server error
 		w.WriteHeader(http.StatusInternalServerError)
+		log.Printf("failed to set session token in redis: %v", err)
 		return
 	}
 
@@ -178,4 +154,6 @@ func Welcome(w http.ResponseWriter, r *http.Request, cache redis.Conn) {
 	}
 	// Finally, return the welcome message to the user
 	w.Write([]byte(fmt.Sprintf("Welcome %s!", response)))
+
+	log.Printf("logged in %s", response)
 }

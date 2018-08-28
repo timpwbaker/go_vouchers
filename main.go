@@ -28,6 +28,12 @@ func main() {
 		logger.Fatalf("dotenv error: %v\n", err)
 	}
 
+	port := os.Getenv("PORT")
+
+	if port == "" {
+		log.Fatal("$PORT must be set")
+	}
+
 	// "Signin" and "Signup" are handler that we will implement
 	http.HandleFunc("/signup", func(w http.ResponseWriter, r *http.Request) {
 		handlers.Signup(w, r, db, cache)
@@ -41,14 +47,15 @@ func main() {
 	// initialize our database connection
 	initDB()
 	initCache()
-	// start the server on port 8000
-	log.Fatal(http.ListenAndServe(":8000", nil))
+	// start the server on the port specificed in the ENV
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 	fmt.Printf("running server")
 }
 
 func initCache() {
+	redisURL := os.Getenv("REDIS_URL")
 	// Initialize the redis connection to a redis instance running on your local machine
-	conn, err := redis.DialURL("redis://localhost")
+	conn, err := redis.DialURL(redisURL)
 	if err != nil {
 		panic(err)
 	}

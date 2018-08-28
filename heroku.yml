@@ -1,0 +1,7 @@
+# Officially unsupported, but works.
+build:
+  languages:
+    - go
+
+run:
+  web: go_vouchers
